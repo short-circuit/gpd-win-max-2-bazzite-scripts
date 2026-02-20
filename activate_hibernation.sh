@@ -257,11 +257,9 @@ if [ -n "$SWAP_UUID" ] && [ -n "$RESUME_OFFSET" ]; then
       echo "   -> Detected traditional GRUB system"
       rotate_backups "/etc/default/grub"
       
+      sed -i 's/resume=[^ ]*//' /etc/default/grub
+      sed -i 's/resume_offset=[^ ]*//' /etc/default/grub
       sed -i "s/GRUB_CMDLINE_LINUX=\"\(.*\)\"/GRUB_CMDLINE_LINUX=\"\1 resume=UUID=${SWAP_UUID} resume_offset=${RESUME_OFFSET}\"/" /etc/default/grub
-      
-      sed -i 's/GRUB_CMDLINE_LINUX="\([^"]*\)resume=[^"]*"/GRUB_CMDLINE_LINUX="\1"/' /etc/default/grub
-      sed -i 's/GRUB_CMDLINE_LINUX="\([^"]*\)resume_offset=[^"]*"/GRUB_CMDLINE_LINUX="\1"/' /etc/default/grub
-      sed -i "s/GRUB_CMDLINE_LINUX=\"\(.*\)\"/GRUB_CMDLINE_LINUX=\"\1 resume=UUID=${SWAP_UUID} resume_offset=${RESUME_OFFSET}\"/" /etc/default/grub"
       sed -i 's/GRUB_CMDLINE_LINUX="  */GRUB_CMDLINE_LINUX="/' /etc/default/grub
       sed -i 's/  *"/"/' /etc/default/grub
       
