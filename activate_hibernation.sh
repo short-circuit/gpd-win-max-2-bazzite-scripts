@@ -86,11 +86,49 @@ else
   fi
 fi
 
-if [ "$FORCE" = false ] && [ "$SWAP_ACTIVE" = true ] && [ "$SWAP_CORRECT_SIZE" = true ] && [ "$CONFIG_NEEDED" = false ]; then
+check_kernel_params() {
+  local expected_uuid="$1"
+  local expected_offset="$2"
+  
+  if command -v rpm-ostree &>/dev/null; then
+    local current_kargs
+    current_kargs=$(rpm-ostree kargs 2>/dev/null || echo "")
+    if echo "$current_kargs" | grep -q "resume=UUID=${expected_uuid}" && \
+       echo "$current_kargs" | grep -q "resume_offset=${expected_offset}"; then
+      return 0
+    fi
+  elif [ -f /proc/cmdline ]; then
+    if grep -q "resume=UUID=${expected_uuid}" /proc/cmdline && \
+       grep -q "resume_offset=${expected_offset}" /proc/cmdline; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+KERNEL_PARAMS_NEEDED=false
+SWAP_UUID=""
+RESUME_OFFSET=""
+
+if [ -f "/var/swap/swapfile" ]; then
+  SWAP_UUID=$(findmnt -no UUID -T /var/swap/swapfile 2>/dev/null || echo "")
+  RESUME_OFFSET=$(btrfs inspect-internal map-swapfile -r /var/swap/swapfile 2>/dev/null || echo "")
+  
+  if [ -n "$SWAP_UUID" ] && [ -n "$RESUME_OFFSET" ]; then
+    if [ "$FORCE" = true ]; then
+      KERNEL_PARAMS_NEEDED=true
+    elif ! check_kernel_params "$SWAP_UUID" "$RESUME_OFFSET"; then
+      KERNEL_PARAMS_NEEDED=true
+    fi
+  fi
+fi
+
+if [ "$FORCE" = false ] && [ "$SWAP_ACTIVE" = true ] && [ "$SWAP_CORRECT_SIZE" = true ] && [ "$CONFIG_NEEDED" = false ] && [ "$KERNEL_PARAMS_NEEDED" = false ]; then
   echo "✅ Already configured correctly!"
   echo "   - Swap: ${RAM_GB}GB (active)"
   echo "   - Mode: Suspend-then-Hibernate"
   echo "   - Delay: 30 minutes"
+  echo "   - Kernel params: resume=UUID=$SWAP_UUID resume_offset=$RESUME_OFFSET"
   echo "   Use --force to reconfigure anyway."
   exit 0
 fi
@@ -165,6 +203,9 @@ if ! grep -q "^/var/swap/swapfile" /etc/fstab; then
 fi
 echo "   -> Swap active!"
 
+SWAP_UUID=$(findmnt -no UUID -T /var/swap/swapfile 2>/dev/null || echo "")
+RESUME_OFFSET=$(btrfs inspect-internal map-swapfile -r /var/swap/swapfile 2>/dev/null || echo "")
+
 echo "⚙️  Configuring systemd sleep settings..."
 
 CONFIG_CHANGED=false
@@ -196,17 +237,66 @@ fi
 if [ "$CONFIG_CHANGED" = true ]; then
   echo "🔄 Reloading systemd..."
   systemctl daemon-reload
-  echo ""
-  echo "⚠️  WARNING: logind.conf was modified."
-  echo "   A reboot is required for changes to take full effect."
-  echo "   (Restarting systemd-logind now would crash your GUI session.)"
 fi
 
+KERNEL_PARAMS_CHANGED=false
+
+if [ -n "$SWAP_UUID" ] && [ -n "$RESUME_OFFSET" ]; then
+  echo "🔧 Configuring kernel parameters for hibernation..."
+  echo "   -> UUID: $SWAP_UUID"
+  echo "   -> Resume offset: $RESUME_OFFSET"
+  
+  if [ "$FORCE" = true ] || ! check_kernel_params "$SWAP_UUID" "$RESUME_OFFSET"; then
+    if command -v rpm-ostree &>/dev/null; then
+      echo "   -> Detected rpm-ostree system (Bazzite/Silverblue)"
+      rpm-ostree kargs \
+        --append-if-missing "resume=UUID=${SWAP_UUID}" \
+        --append-if-missing "resume_offset=${RESUME_OFFSET}"
+      KERNEL_PARAMS_CHANGED=true
+    elif [ -f /etc/default/grub ]; then
+      echo "   -> Detected traditional GRUB system"
+      rotate_backups "/etc/default/grub"
+      
+      sed -i "s/GRUB_CMDLINE_LINUX=\"\(.*\)\"/GRUB_CMDLINE_LINUX=\"\1 resume=UUID=${SWAP_UUID} resume_offset=${RESUME_OFFSET}\"/" /etc/default/grub
+      
+      sed -i 's/GRUB_CMDLINE_LINUX="\([^"]*\)resume=[^"]*"/GRUB_CMDLINE_LINUX="\1"/' /etc/default/grub
+      sed -i 's/GRUB_CMDLINE_LINUX="\([^"]*\)resume_offset=[^"]*"/GRUB_CMDLINE_LINUX="\1"/' /etc/default/grub
+      sed -i "s/GRUB_CMDLINE_LINUX=\"\(.*\)\"/GRUB_CMDLINE_LINUX=\"\1 resume=UUID=${SWAP_UUID} resume_offset=${RESUME_OFFSET}\"/" /etc/default/grub"
+      sed -i 's/GRUB_CMDLINE_LINUX="  */GRUB_CMDLINE_LINUX="/' /etc/default/grub
+      sed -i 's/  *"/"/' /etc/default/grub
+      
+      if command -v grub-mkconfig &>/dev/null; then
+        grub-mkconfig -o /boot/grub/grub.cfg
+      elif command -v grub2-mkconfig &>/dev/null; then
+        grub2-mkconfig -o /boot/grub2/grub.cfg
+      fi
+      KERNEL_PARAMS_CHANGED=true
+    else
+      echo "   ⚠️  WARNING: Could not detect bootloader type."
+      echo "   Please manually add kernel parameters:"
+      echo "   resume=UUID=${SWAP_UUID} resume_offset=${RESUME_OFFSET}"
+    fi
+  fi
+else
+  echo "   ⚠️  WARNING: Could not determine swap UUID or resume offset."
+  echo "   Kernel parameters not configured. Hibernate may not work."
+fi
+
+echo ""
 echo "✅ DONE!"
 echo "   - Swap: ${RAM_GB}GB"
 echo "   - Mode: Suspend-then-Hibernate"
 echo "   - Delay: 30 minutes"
+
+NEEDS_REBOOT=false
 if [ "$CONFIG_CHANGED" = true ]; then
+  NEEDS_REBOOT=true
+fi
+if [ "$KERNEL_PARAMS_CHANGED" = true ]; then
+  NEEDS_REBOOT=true
+fi
+
+if [ "$NEEDS_REBOOT" = true ]; then
   echo "   - Action required: Reboot to activate all changes"
 else
   echo "   You can test now by closing the lid or running 'systemctl suspend'"
