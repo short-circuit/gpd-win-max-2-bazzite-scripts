@@ -2,6 +2,17 @@
 
 Automatically configures suspend-then-hibernate on GPD Win Max 2 running Bazzite (or other BTRFS-based systems).
 
+## ⚠️ Experimental - Use at Your Own Risk
+
+**This script is experimental and only tested on the GPD Win Max 2 2024 model.**
+
+Using this script may prevent your system from booting. If something goes wrong:
+
+- **On Bazzite/rpm-ostree systems**: You can boot into the previous working deployment from the bootloader menu to restore functionality
+- On other systems, you may need to manually fix kernel parameters or fstab entries
+
+**Proceed with caution and ensure you have a backup of important data.**
+
 ## What it does
 
 1. Creates a swapfile matching your RAM size (required for hibernation)
