@@ -26,9 +26,30 @@ fi
 
 echo "=== GPD Win Max 2 Suspend-then-Hibernate Setup ==="
 
-RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-RAM_GB=$(( (RAM_KB + 1048575) / 1048576 ))
-echo "   -> Detected ${RAM_GB}GB RAM"
+get_physical_ram_gb() {
+  if command -v dmidecode &>/dev/null && dmidecode -t memory 2>/dev/null | grep -q "Size:"; then
+    local total_mb=0
+    while read -r size; do
+      if [[ "$size" =~ ^([0-9]+)[[:space:]]*MB$ ]]; then
+        total_mb=$((total_mb + BASH_REMATCH[1]))
+      elif [[ "$size" =~ ^([0-9]+)[[:space:]]*GB$ ]]; then
+        total_mb=$((total_mb + BASH_REMATCH[1] * 1024))
+      elif [[ "$size" =~ ^([0-9]+)[[:space:]]*TB$ ]]; then
+        total_mb=$((total_mb + BASH_REMATCH[1] * 1048576))
+      fi
+    done < <(dmidecode -t memory 2>/dev/null | grep "Size:" | sed 's/Size:[[:space:]]*//')
+    if [ "$total_mb" -gt 0 ]; then
+      echo $(( (total_mb + 1023) / 1024 ))
+      return
+    fi
+  fi
+  local mem_kb
+  mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+  echo $(( (mem_kb + 1048575) / 1048576 ))
+}
+
+RAM_GB=$(get_physical_ram_gb)
+echo "   -> Detected ${RAM_GB}GB RAM (total physical memory)"
 
 SWAP_ACTIVE=false
 SWAP_CORRECT_SIZE=false
@@ -155,6 +176,11 @@ systemctl disable --now swap-create@zram0.service 2>/dev/null || true
 
 swapoff -a 2>/dev/null || true
 
+if [ -f /etc/systemd/zram-generator.conf ] || [ -f /usr/etc/systemd/zram-generator.conf ]; then
+  echo "" > /etc/systemd/zram-generator.conf
+  echo "   -> Disabled zram-generator"
+fi
+
 if grep -q "swap" /etc/fstab; then
   rotate_backups "/etc/fstab"
   sed -i '/swap/d' /etc/fstab
@@ -181,6 +207,11 @@ fi
 
 chmod 700 /var/swap
 
+if command -v semanage &>/dev/null && command -v restorecon &>/dev/null; then
+  semanage fcontext -a -t var_t /var/swap 2>/dev/null || true
+  restorecon /var/swap 2>/dev/null || true
+fi
+
 if [ ! -f "/var/swap/swapfile" ]; then
   if command -v btrfs &>/dev/null; then
     btrfs filesystem mkswapfile --size "${RAM_GB}G" /var/swap/swapfile
@@ -194,12 +225,17 @@ if [ ! -f "/var/swap/swapfile" ]; then
   fi
 fi
 
+if command -v semanage &>/dev/null && command -v restorecon &>/dev/null; then
+  semanage fcontext -a -t swapfile_t /var/swap/swapfile 2>/dev/null || true
+  restorecon /var/swap/swapfile 2>/dev/null || true
+fi
+
 if ! grep -q "/var/swap/swapfile" /proc/swaps 2>/dev/null; then
   swapon /var/swap/swapfile
 fi
 
 if ! grep -q "^/var/swap/swapfile" /etc/fstab; then
-  echo "/var/swap/swapfile none swap defaults 0 0" >> /etc/fstab
+  echo "/var/swap/swapfile none swap defaults,nofail 0 0" >> /etc/fstab
 fi
 echo "   -> Swap active!"
 
